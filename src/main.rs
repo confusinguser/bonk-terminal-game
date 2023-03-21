@@ -1,7 +1,4 @@
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::channel;
 use std::thread;
 use std::time::Duration;
 use rand::Rng;
@@ -16,35 +13,45 @@ fn main() {
         player: Entity::default(),
         coin_pos: (0, 0),
         score: 0,
+        game_over: false,
     };
-    let mut terminal_display = TerminalDisplay::default();
+    let terminal_display = Arc::new(Mutex::new(TerminalDisplay::default()));
 
     game.player.position = game.get_random_position_on_board();
     game.coin_pos = game.get_random_position_on_board();
 
     let arc = Arc::<Mutex<usize>>::new(Mutex::new(0));
-    let cloned_arc = Arc::clone(&arc);
-    thread::spawn(move || {
-        loop {
-            let mut line = String::new();
-            std::io::stdin().read_line(&mut line).expect("Failed to read line");
-            *cloned_arc.lock().unwrap() += 1;
-        }
-    });
+    {
+        let cloned_arc = Arc::clone(&arc);
+        let cloned_terminal_display = terminal_display.clone();
+        thread::spawn(move || {
+            loop {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).expect("Failed to read line");
+                cloned_terminal_display.lock().unwrap().move_cursor_up(1);
+                *cloned_arc.lock().unwrap() += 1;
+            }
+        });
+    }
 
     let mut latest_enter = 0;
     loop {
         {
             let current_enter = *arc.lock().unwrap();
             if latest_enter != current_enter { // Means other side did trigger while we were sleeping
-                game.player.going_right = !game.player.going_right;
-                TerminalDisplay::move_cursor_up((current_enter - latest_enter) as u16);
+                let diff = current_enter - latest_enter;
+                if diff % 2 == 1 {
+                    game.player.going_right = !game.player.going_right;
+                }
                 latest_enter = current_enter;
             }
         }
         game.update_board();
+        if game.game_over {
+            break;
+        }
         let board = game.render_board();
-        terminal_display.update_display(TerminalDisplay::render(&board));
+        terminal_display.lock().unwrap().update_display(TerminalDisplay::render(&board));
         thread::sleep(Duration::from_millis(100))
     }
 }
@@ -55,6 +62,7 @@ struct Game {
     play_area: (usize, usize),
     coin_pos: (usize, usize),
     score: u32,
+    game_over: bool,
 }
 
 struct Entity {
@@ -147,8 +155,11 @@ impl Game {
     }
 
     fn update_board(&mut self) {
-        for enemy in &mut self.enemies {
-            enemy.update_entity(self.play_area);
+        if (self.score / 10) + 1 > self.enemies.len() as u32 {
+            let mut enemy = Entity::default();
+            enemy.position = self.get_random_position_on_board();
+            self.enemies.push(enemy);
+            println!("spawning enemy");
         }
         self.player.update_entity(self.play_area);
         if self.player.position.0.abs_diff(self.coin_pos.0) <= PLAYER_DIMS.0 + 2 &&
@@ -156,6 +167,13 @@ impl Game {
             self.score += 1;
             self.coin_pos = self.get_random_position_on_board();
         }
+        for enemy in &mut self.enemies {
+            enemy.update_entity(self.play_area);
+            if distance_sqr(self.player.position, enemy.position) < 4 {
+                self.game_over = true;
+            }
+        }
+
     }
 
     pub(crate) fn is_inside_board(&self, position: ((usize, bool), (usize, bool))) -> bool {
